@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: social-ai-playbook
+    runtime: node
+    plan: free
+    buildCommand: ""
+    startCommand: "node server.js"
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
