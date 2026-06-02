@@ -23,7 +23,7 @@ const mimeTypes = {
   ".svg": "image/svg+xml"
 };
 
-const server = createServer(async (req, res) => {
+export async function handleRequest(req, res) {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
@@ -36,7 +36,7 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 200, {
         passwordRequired: Boolean(process.env.APP_PASSWORD),
         serverKeyConfigured: Boolean(process.env.DEEPSEEK_API_KEY),
-        historyStore: process.env.HISTORY_FILE ? "file" : "memory"
+        historyStore: getHistoryStoreKind()
       });
     }
 
@@ -67,7 +67,7 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/api/history") {
       return sendJson(res, 200, {
         items: historyItems,
-        store: process.env.HISTORY_FILE ? "file" : "memory"
+        store: getHistoryStoreKind()
       });
     }
 
@@ -87,11 +87,14 @@ const server = createServer(async (req, res) => {
   } catch (error) {
     sendJson(res, 500, { error: error.message || "Server error" });
   }
-});
+}
 
-server.listen(port, host, () => {
-  console.log(`Social AI Playbook running at http://${host}:${port}`);
-});
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const server = createServer(handleRequest);
+  server.listen(port, host, () => {
+    console.log(`Social AI Playbook running at http://${host}:${port}`);
+  });
+}
 
 async function handleAnalyze(req, res) {
   const body = await readJson(req);
@@ -474,6 +477,12 @@ function loadHistoryStore() {
   } catch {
     return [];
   }
+}
+
+function getHistoryStoreKind() {
+  if (process.env.HISTORY_FILE) return "file";
+  if (process.env.VERCEL) return "browser";
+  return "memory";
 }
 
 async function persistHistoryStore() {
