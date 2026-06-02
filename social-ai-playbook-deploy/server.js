@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
-import { extname, join, normalize } from "node:path";
+import { dirname, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
@@ -13,6 +13,7 @@ loadEnvFile(join(root, ".env"));
 const port = Number(process.env.PORT || 8787);
 const host = process.env.HOST || "127.0.0.1";
 let latestImport = null;
+let historyItems = loadHistoryStore();
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -22,7 +23,7 @@ const mimeTypes = {
   ".svg": "image/svg+xml"
 };
 
-const server = createServer(async (req, res) => {
+export async function handleRequest(req, res) {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
@@ -34,7 +35,8 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/api/config") {
       return sendJson(res, 200, {
         passwordRequired: Boolean(process.env.APP_PASSWORD),
-        serverKeyConfigured: Boolean(process.env.DEEPSEEK_API_KEY)
+        serverKeyConfigured: Boolean(process.env.DEEPSEEK_API_KEY),
+        historyStore: getHistoryStoreKind()
       });
     }
 
@@ -62,6 +64,21 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 200, { item: latestImport });
     }
 
+    if (req.method === "GET" && url.pathname === "/api/history") {
+      return sendJson(res, 200, {
+        items: historyItems,
+        store: getHistoryStoreKind()
+      });
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/history") {
+      return handleCreateHistory(req, res);
+    }
+
+    if (req.method === "DELETE" && url.pathname === "/api/history") {
+      return handleDeleteHistory(url, res);
+    }
+
     if (req.method === "GET") {
       return serveStatic(url.pathname, res);
     }
@@ -70,11 +87,14 @@ const server = createServer(async (req, res) => {
   } catch (error) {
     sendJson(res, 500, { error: error.message || "Server error" });
   }
-});
+}
 
-server.listen(port, host, () => {
-  console.log(`Social AI Playbook running at http://${host}:${port}`);
-});
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const server = createServer(handleRequest);
+  server.listen(port, host, () => {
+    console.log(`Social AI Playbook running at http://${host}:${port}`);
+  });
+}
 
 async function handleAnalyze(req, res) {
   const body = await readJson(req);
@@ -109,7 +129,7 @@ async function handleAnalyze(req, res) {
           role: "system",
           content: [
             "你是一个中文 AI 内容研究员、写作策划和实战型增长顾问。",
-            "你的任务不是做普通摘要，而是把小红书文章/视频、抖音视频、短内容文案和评论区整理成可直接支撑高质量写作的选题资产。",
+            "你的任务不是做普通摘要，而是把可播放链接、短视频、文章、短内容文案和评论区整理成可直接支撑高质量写作的选题资产。",
             "高质量提炼必须达成：观点清楚、读者需求清楚、方法论可复用、写作角度可展开、攻略可执行、风险边界清楚。",
             "遇到 AI 相关内容时，要主动提炼工作流、工具组合、提示词思路、适用场景、商业机会、增长玩法、风险和可复用攻略。",
             "如果链接内容没有被提供，只能基于用户粘贴的正文和备注分析，不要假装读取了链接。"
@@ -277,6 +297,43 @@ async function handleImport(req, res) {
   sendJson(res, 200, { ok: true });
 }
 
+async function handleCreateHistory(req, res) {
+  const body = await readJson(req);
+  const item = {
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    title: String(body.title || "").trim().slice(0, 120) || "未命名提炼",
+    link: String(body.link || "").trim(),
+    mode: String(body.mode || "playbook"),
+    note: String(body.note || "").trim().slice(0, 2000),
+    sourceText: String(body.sourceText || "").trim().slice(0, 12000),
+    commentsText: String(body.commentsText || "").trim().slice(0, 12000),
+    result: String(body.result || "").trim().slice(0, 80000),
+    createdAt: new Date().toISOString()
+  };
+
+  if (!item.result) {
+    return sendJson(res, 400, { error: "历史记录缺少提炼结果。" });
+  }
+
+  historyItems = [item, ...historyItems].slice(0, 200);
+  await persistHistoryStore();
+  sendJson(res, 200, { item });
+}
+
+async function handleDeleteHistory(url, res) {
+  const id = url.searchParams.get("id");
+  if (!id) return sendJson(res, 400, { error: "缺少历史记录 id。" });
+
+  const before = historyItems.length;
+  historyItems = historyItems.filter((item) => item.id !== id);
+  if (historyItems.length === before) {
+    return sendJson(res, 404, { error: "没有找到这条历史记录。" });
+  }
+
+  await persistHistoryStore();
+  sendJson(res, 200, { ok: true });
+}
+
 async function serveStatic(pathname, res) {
   const safePath = pathname === "/" ? "/index.html" : pathname;
   const filePath = normalize(join(publicDir, safePath));
@@ -298,7 +355,7 @@ function buildPrompt({ link, sourceText, commentsText, note, mode }) {
   }[mode] || "形成可执行攻略";
 
   return `
-请分析下面的小红书/抖音内容，输出中文结构化结果。目标：${modeLabel}。
+请分析下面的可播放链接或短内容素材，输出中文结构化结果。目标：${modeLabel}。
 
 质量目标：
 - 不是流水账总结，要产出能直接影响撰写质量的写作前置资产。
@@ -411,6 +468,30 @@ function loadEnvFile(path) {
   }
 }
 
+function loadHistoryStore() {
+  const file = process.env.HISTORY_FILE;
+  if (!file || !existsSync(file)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    return Array.isArray(parsed) ? parsed.slice(0, 200) : [];
+  } catch {
+    return [];
+  }
+}
+
+function getHistoryStoreKind() {
+  if (process.env.HISTORY_FILE) return "file";
+  if (process.env.VERCEL) return "browser";
+  return "memory";
+}
+
+async function persistHistoryStore() {
+  const file = process.env.HISTORY_FILE;
+  if (!file) return;
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, JSON.stringify(historyItems, null, 2), "utf8");
+}
+
 async function readJson(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -472,7 +553,7 @@ function sendCors(res) {
 function corsHeaders() {
   return {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type,X-DeepSeek-API-Key,X-App-Password"
   };
 }
