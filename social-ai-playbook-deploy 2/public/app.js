@@ -336,12 +336,19 @@ function showView(view) {
   elements.navItems.forEach((item) => item.classList.toggle("active", item.dataset.view === view));
 
   if (isHistory) {
-    elements.historyStoreBadge.textContent = state.historyStore === "file" ? "cloud-ready file store" : "memory store";
+    elements.historyStoreBadge.textContent = historyStoreLabel();
     loadHistory();
   }
 }
 
 async function loadHistory() {
+  if (state.historyStore === "browser") {
+    state.historyItems = loadBrowserHistory();
+    elements.historyStoreBadge.textContent = historyStoreLabel();
+    renderHistoryList();
+    return;
+  }
+
   setBusy(elements.refreshHistoryButton, true, "刷新中…");
   try {
     const response = await fetch("/api/history", { headers: authHeaders() });
@@ -349,7 +356,7 @@ async function loadHistory() {
     if (!response.ok) throw new Error(data.error || "读取历史失败");
     state.historyItems = data.items || [];
     state.historyStore = data.store || state.historyStore;
-    elements.historyStoreBadge.textContent = state.historyStore === "file" ? "cloud-ready file store" : "memory store";
+    elements.historyStoreBadge.textContent = historyStoreLabel();
     renderHistoryList();
   } catch (error) {
     showToast(error.message, "error");
@@ -361,6 +368,13 @@ async function loadHistory() {
 async function saveHistoryItem(payload) {
   if (!payload.result) return;
   const title = buildHistoryTitle(payload);
+  if (state.historyStore === "browser") {
+    const item = buildBrowserHistoryItem({ ...payload, title });
+    state.historyItems = [item, ...loadBrowserHistory()].slice(0, 200);
+    saveBrowserHistory(state.historyItems);
+    return;
+  }
+
   try {
     const response = await fetch("/api/history", {
       method: "POST",
@@ -433,6 +447,14 @@ function openHistoryItem(item) {
 }
 
 async function deleteHistoryItem(id) {
+  if (state.historyStore === "browser") {
+    state.historyItems = loadBrowserHistory().filter((item) => item.id !== id);
+    saveBrowserHistory(state.historyItems);
+    renderHistoryList();
+    showToast("历史记录已删除", "success");
+    return;
+  }
+
   try {
     const response = await fetch(`/api/history?id=${encodeURIComponent(id)}`, {
       method: "DELETE",
@@ -446,6 +468,39 @@ async function deleteHistoryItem(id) {
   } catch (error) {
     showToast(error.message, "error");
   }
+}
+
+function historyStoreLabel() {
+  if (state.historyStore === "file") return "cloud file store";
+  if (state.historyStore === "browser") return "browser local store";
+  return "memory store";
+}
+
+function buildBrowserHistoryItem(payload) {
+  return {
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    title: String(payload.title || "").slice(0, 120) || "未命名提炼",
+    link: payload.link || "",
+    mode: payload.mode || "playbook",
+    note: payload.note || "",
+    sourceText: payload.sourceText || "",
+    commentsText: payload.commentsText || "",
+    result: payload.result || "",
+    createdAt: new Date().toISOString()
+  };
+}
+
+function loadBrowserHistory() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem("contentforge_history") || "[]");
+    return Array.isArray(parsed) ? parsed.slice(0, 200) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveBrowserHistory(items) {
+  localStorage.setItem("contentforge_history", JSON.stringify(items.slice(0, 200)));
 }
 
 function buildHistoryTitle(payload) {
